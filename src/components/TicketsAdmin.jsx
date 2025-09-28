@@ -34,7 +34,7 @@ export default function TicketsAdmin() {
     const [usedFilter, setUsedFilter] = useState("all"); // all|used|unused
     const [q, setQ] = useState("");
     const [qLive, setQLive] = useState("");
-    const [loading, setLoading] = useState(true);
+    const [loading, setLoading] = useState(false);          // ⬅️ arranca en false
     const [loadingList, setLoadingList] = useState(true);
     const [err, setErr] = useState("");
 
@@ -107,6 +107,8 @@ export default function TicketsAdmin() {
         );
     }
 
+    const isBusy = loading || loadingList;
+
     return (
         <div className="card" style={{ overflow: "hidden" }}>
             <div
@@ -127,8 +129,8 @@ export default function TicketsAdmin() {
                         flexWrap: "wrap",
                     }}
                 >
-                    <button onClick={refreshAll} disabled={loading}>
-                        🔄 Actualizar
+                    <button onClick={refreshAll} disabled={isBusy} title="Volver a cargar">
+                        {isBusy ? "Actualizando…" : "🔄 Actualizar"}
                     </button>
                 </div>
             </div>
@@ -231,12 +233,11 @@ export default function TicketsAdmin() {
                         items.map((row) => (
                             <tr
                                 key={row.ticket_id}
-                                // Opcional: hacer toda la fila clickeable salvo el <Link>
                                 onClick={(e) => {
                                     if ((e.target).closest && (e.target).closest("a")) return;
                                     navigate(`/ticket/${row.ticket_id}`);
                                 }}
-                                style={{cursor: "pointer"}}
+                                style={{ cursor: "pointer" }}
                             >
                                 <td>{row.n}</td>
                                 <td>
@@ -245,18 +246,14 @@ export default function TicketsAdmin() {
                                         text={row.is_used ? "Usada" : "No usada"}
                                     />
                                 </td>
-                                <td style={{wordBreak: "break-all"}}>
+                                <td style={{ wordBreak: "break-all" }}>
                                     <Link
                                         to={`/ticket/${row.ticket_id}`}
-                                        style={{
-                                            color: "#2563eb",
-                                            textDecoration: "none"
-                                        }}
+                                        style={{ color: "#2563eb", textDecoration: "none" }}
                                     >
                                         {row.ticket_id}
                                     </Link>
                                 </td>
-
 
                                 <td>{row.purchaser_name}</td>
                                 <td>{row.national_id}</td>
