@@ -30,7 +30,7 @@ export default function CreateTicket() {
     const defaults = useMemo(() => getHalloweenDefaults(), []);
 
     const [purchaser_name, setName] = useState("");
-    const [event_id, setEvent] = useState("Halloween Batara");
+    const [event_id, setEvent] = useState("Halloween Party Batara");
     const [national_id, setCedula] = useState("");
     const [phone, setPhone] = useState("");
 
