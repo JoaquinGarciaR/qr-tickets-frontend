@@ -31,7 +31,7 @@ export default function Login() {
                 <button>Entrar</button>
                 {err && <p className="error">{err}</p>}
             </form>
-            <small>Usuarios demo: admin/admin123 · taquilla/scan2025 · organizador/evento</small>
+            {/*<small>Usuarios demo: admin/admin123 · taquilla/scan2025 · organizador/evento</small>*/}
         </div>
     );
 }
