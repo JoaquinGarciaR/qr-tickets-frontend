@@ -5,7 +5,10 @@ export function setToken(t) { _token = t || null; }
 export function getToken() { return _token; }
 
 async function http(method, path, body) {
-    const headers = { "Content-Type": "application/json" };
+    const headers = {
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "ok",   // ⬅️ este es el header clave
+    };
     if (_token) headers["Authorization"] = `Bearer ${_token}`;
 
     const res = await fetch(`${BASE}${path}`, {
