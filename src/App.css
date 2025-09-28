@@ -1,0 +1,54 @@
+:root { font-family: system-ui, sans-serif; }
+body { margin: 0; background: #f6f7f9; color: #1e293b; }
+.container { max-width: 920px; margin: 0 auto; padding: 16px; }
+
+.nav { display:flex; align-items:center; justify-content:space-between; padding:12px 0; }
+.nav .brand { font-weight:700; }
+.nav .links a { margin-left:12px; text-decoration:none; color:#334155; }
+.nav .links a.active { font-weight:600; }
+
+.card { background:#fff; padding:16px; border-radius:12px; box-shadow: 0 2px 8px rgba(0,0,0,.06); margin: 12px 0; }
+.form { display:grid; gap:10px; }
+input, textarea, button, select { padding:10px; border-radius:8px; border:1px solid #cbd5e1; font:inherit; }
+button { cursor:pointer; }
+.error { color:#b91c1c; }
+.qr {
+    display: flex;
+    justify-content: center; /* centrar horizontal */
+    align-items: center;     /* centrar vertical si el contenedor tiene altura */
+    margin: 16px 0;
+}
+
+.qr img {
+    width: 80vw;        /* ocupa el 80% del ancho de la pantalla */
+    max-width: 300px;   /* pero nunca más grande que 300px */
+    height: auto;       /* mantiene proporción */
+}
+.row { display:flex; gap:8px; margin-top:12px; }
+.btn { background:#0ea5e9; color:#fff; padding:8px 12px; border-radius:8px; text-decoration:none; }
+.result { margin-top:12px; padding:12px; border-radius:12px; }
+.result.ok { background:#ecfeff; border:1px solid #67e8f9; }
+.result.bad { background:#fef2f2; border:1px solid #fecaca; }
+.scanner { overflow:hidden; border-radius:12px; }
+.manual { margin-top:12px; display:grid; gap:8px; }
+.kpi {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px 12px;
+}
+.kpi-title { font-size: 12px; color: #64748b; }
+.kpi-value { font-size: 20px; font-weight: 700; color: #0f172a; }
+
+.tbl {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 900px;
+}
+.tbl th, .tbl td {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 1px solid #e5e7eb;
+    font-size: 14px;
+}
+.tbl thead th { background: #f1f5f9; }
