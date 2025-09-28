@@ -8,7 +8,7 @@ async function http(method, path, body) {
     const headers = { "Content-Type": "application/json" };
     if (_token) headers["Authorization"] = `Bearer ${_token}`;
 
-    const res = await fetch(`/api${path}`, {
+    const res = await fetch(`${path}`, {
         method,
         headers,
         body: body ? JSON.stringify(body) : undefined,
