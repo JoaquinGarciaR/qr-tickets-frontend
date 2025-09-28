@@ -68,15 +68,18 @@ export default function TicketsAdmin() {
 
     async function refreshAll() {
         try {
-            setLoading(true);
+            setLoading(true);       // estado del botón
+            +   setLoadingList(true);   // también muestra "Cargando…" en la tabla
             setErr("");
             await Promise.all([loadSummary(), loadList()]);
         } catch (e) {
             setErr(e.message || "Error cargando datos");
         } finally {
             setLoading(false);
+            +   setLoadingList(false);
         }
     }
+
 
     // Carga inicial y cuando cambian filtros/paginación
     useEffect(() => {
@@ -129,9 +132,18 @@ export default function TicketsAdmin() {
                         flexWrap: "wrap",
                     }}
                 >
-                    <button onClick={refreshAll} disabled={isBusy} title="Volver a cargar">
+                    <button
+                        type="button"                    // ⬅️ clave en móvil si hay un <form> arriba
+                        onClick={refreshAll}
+                        onTouchStart={() => {
+                        }}          // ⬅️ opcional: elimina el delay de tap en algunos navegadores
+                        disabled={isBusy}
+                        title="Volver a cargar"
+                    >
                         {isBusy ? "Actualizando…" : "🔄 Actualizar"}
                     </button>
+
+
                 </div>
             </div>
 
