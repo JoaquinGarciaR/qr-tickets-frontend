@@ -9,7 +9,7 @@ export default defineConfig({
     //   key: fs.readFileSync("./localhost-key.pem"),
     //   cert: fs.readFileSync("./localhost.pem"),
     // },
-    allowedHosts : ["472847977a5b.ngrok-free.app"],
+    allowedHosts : ["https://qr-tickets-frontend.vercel.app"],
     // proxy: {
     //   "/api": {
     //     target: "http://localhost:8000", // tu FastAPI local
