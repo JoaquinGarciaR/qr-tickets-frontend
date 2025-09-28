@@ -224,6 +224,7 @@ export default function TicketsAdmin() {
                         <th>Ticket ID</th>
                         <th>Nombre</th>
                         <th>Cédula</th>
+                        <th>Teléfono</th>
                         <th>Evento</th>
                         <th>Fecha evento</th>
                         <th>Creado por</th>
@@ -249,7 +250,7 @@ export default function TicketsAdmin() {
                                     if ((e.target).closest && (e.target).closest("a")) return;
                                     navigate(`/ticket/${row.ticket_id}`);
                                 }}
-                                style={{ cursor: "pointer" }}
+                                style={{cursor: "pointer"}}
                             >
                                 <td>{row.n}</td>
                                 <td>
@@ -258,10 +259,10 @@ export default function TicketsAdmin() {
                                         text={row.is_used ? "Usada" : "No usada"}
                                     />
                                 </td>
-                                <td style={{ wordBreak: "break-all" }}>
+                                <td style={{wordBreak: "break-all"}}>
                                     <Link
                                         to={`/ticket/${row.ticket_id}`}
-                                        style={{ color: "#2563eb", textDecoration: "none" }}
+                                        style={{color: "#2563eb", textDecoration: "none"}}
                                     >
                                         {row.ticket_id}
                                     </Link>
@@ -269,6 +270,7 @@ export default function TicketsAdmin() {
 
                                 <td>{row.purchaser_name}</td>
                                 <td>{row.national_id}</td>
+                                <td>{row.phone}</td>
                                 <td>{row.event_id}</td>
                                 <td>{row.event_date}</td>
                                 <td>{row.created_by}</td>

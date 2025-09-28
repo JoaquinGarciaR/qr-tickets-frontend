@@ -118,7 +118,7 @@ export default function TicketCreated() {
             ctx.fillText("Fecha evento:", marginX, y);
             ctx.fillStyle = "#0f172a";
             ctx.font = "400 36px system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial";
-            ctx.fillText(event_at, marginX + 260, y);
+            ctx.fillText(new Date(event_at).toLocaleString(), marginX + 260, y);
             y += 50;
         }
 
