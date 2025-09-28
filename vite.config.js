@@ -9,15 +9,15 @@ export default defineConfig({
     //   key: fs.readFileSync("./localhost-key.pem"),
     //   cert: fs.readFileSync("./localhost.pem"),
     // },
-    allowedHosts : ["00bf33b05c46.ngrok-free.app"],
-    proxy: {
-      "/api": {
-        target: "http://localhost:8000", // tu FastAPI local
-        changeOrigin: true,
-        secure: false,
-        rewrite: (path) => path.replace(/^\/api/, ""),
-      },
-    },
+    allowedHosts : ["472847977a5b.ngrok-free.app"],
+    // proxy: {
+    //   "/api": {
+    //     target: "http://localhost:8000", // tu FastAPI local
+    //     changeOrigin: true,
+    //     secure: false,
+    //     rewrite: (path) => path.replace(/^\/api/, ""),
+    //   },
+    // },
     host: true, // acceder desde el móvil en la LAN
   },
 });
