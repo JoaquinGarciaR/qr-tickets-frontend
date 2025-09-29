@@ -640,28 +640,33 @@ export default function Scanner() {
                         <h3>{result.valid ? "✅ Ticket válido" : "❌ Ticket inválido"}</h3>
                         {result.ticket_id && (
                             <p>
-                                <strong>ID:</strong> {result.ticket_id}
+                                <strong>ID : </strong> {result.ticket_id}
                             </p>
                         )}
                         {result.purchaser_name && (
                             <p>
-                                <strong>Invitado:</strong> {result.purchaser_name}
+                                <strong>Invitado : </strong> {result.purchaser_name}
+                            </p>
+                        )}
+                        {result.national_id && (
+                            <p>
+                                <strong>Cédula : </strong> {result.national_id}
                             </p>
                         )}
                         {result.event_id && (
                             <p>
-                                <strong>Evento:</strong> {result.event_id}
+                                <strong>Evento : </strong> {result.event_id}
                             </p>
                         )}
                         {result.used_at && (
                             <p>
-                                <strong>Usado en:</strong>{" "}
+                                <strong>Usado en : </strong>{" "}
                                 {new Date(result.used_at).toLocaleString()}
                             </p>
                         )}
                         {result.reason && (
                             <p>
-                                <strong>Motivo:</strong> {result.reason}
+                                <strong>Motivo : </strong> {result.reason}
                             </p>
                         )}
                         {result.valid && (
