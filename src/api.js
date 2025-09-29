@@ -29,23 +29,23 @@ async function http(method, path, body) {
 
 export const Api = {
     // auth
-    login: (username, password) => http("POST", "/api/login", { username, password }),
-    logout: () => http("POST", "/api/logout", null),
-    me: () => http("GET", "/api/me", null),
+    login: (username, password) => http("POST", "/login", { username, password }),
+    logout: () => http("POST", "/logout", null),
+    me: () => http("GET", "/me", null),
 
     // tickets
-    createTicket: (payload) => http("POST", "/api/tickets", payload),
-    validate: (qr) => http("POST", "/api/validate", { qr }),
-    validatePeek: (qr) => http("POST", "/api/validate/peek", { qr }),
-    getTicket: (id) => http("GET", `/api/tickets/${id}`),
-    health: () => http("GET", "/api/health"),
-    ticketsSummary: () => http("GET", "/api/tickets/summary"),
+    createTicket: (payload) => http("POST", "/tickets", payload),
+    validate: (qr) => http("POST", "/validate", { qr }),
+    validatePeek: (qr) => http("POST", "/validate/peek", { qr }),
+    getTicket: (id) => http("GET", `/tickets/${id}`),
+    health: () => http("GET", "/health"),
+    ticketsSummary: () => http("GET", "/tickets/summary"),
     ticketsList: ({ page = 1, page_size = 50, used = undefined, q = "" } = {}) => {
         const params = new URLSearchParams();
         params.set("page", String(page));
         params.set("page_size", String(page_size));
         if (q) params.set("q", q);
         if (used !== undefined && used !== null) params.set("used", String(!!used));
-        return http("GET", `/api/tickets/list?${params.toString()}`);
+        return http("GET", `/tickets/list?${params.toString()}`);
     },
 };
