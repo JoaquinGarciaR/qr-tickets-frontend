@@ -1,8 +1,0 @@
-﻿fastapi
-uvicorn
-sqlalchemy
-pydantic
-pydantic-settings
-cryptography
-qrcode[pil]
-python-multipart
