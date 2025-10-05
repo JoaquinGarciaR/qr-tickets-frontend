@@ -1,8 +1,12 @@
 {
   "name": "qr-tickets-frontend",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "packageManager": "pnpm@9.13.1",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "dev": "vite --host",
     "build": "vite build",
@@ -11,6 +15,7 @@
   },
   "dependencies": {
     "@zxing/browser": "^0.1.5",
+    "@zxing/library": "^0.21.3",
     "framer-motion": "^12.23.22",
     "lucide-react": "^0.544.0",
     "react": "^19.1.1",
