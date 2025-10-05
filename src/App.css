@@ -1,5 +1,5 @@
 :root { font-family: system-ui, sans-serif; }
-body { margin: 0; background: #f6f7f9; color: #1e293b; }
+body:not([data-tw]) { margin: 0; background: #f6f7f9; color: #1e293b; }
 .container { max-width: 920px; margin: 0 auto; padding: 16px; }
 
 .nav { display:flex; align-items:center; justify-content:space-between; padding:12px 0; }

@@ -1,39 +1,81 @@
 ﻿// src/pages/Scanner.jsx
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { BrowserMultiFormatReader } from "@zxing/browser";
+
 // Hints opcionales si tienes @zxing/library instalado (mejor precisión)
 // npm i @zxing/library
 let ZXHints = null;
 try {
-    // Carga perezosa para no romper si no está instalada
     // eslint-disable-next-line import/no-extraneous-dependencies
     ZXHints = require("@zxing/library");
 } catch {}
 
 import { Api } from "../api";
+import Modal from "../shared/Modal.jsx";
+
+/* =============================
+ * Utils de rendimiento / imagen
+ * ============================= */
+
+// ROI centrado: ventana ~70% del menor lado
+const getROI = (w, h) => {
+    const side = Math.floor(Math.min(w, h) * 0.7);
+    const x = Math.floor((w - side) / 2);
+    const y = Math.floor((h - side) / 2);
+    return { x, y, width: side, height: side };
+};
+
+// Tamaño máximo del frame a procesar (downscale) para acelerar
+const MAX_PROC_SIDE = 512;
+
+// Luma simple (promedio de R,G,B) para decidir auto-torch
+const estimateLuma = (ctx, w, h) => {
+    const { data } = ctx.getImageData(0, 0, w, h);
+    let sum = 0;
+    // sampleado cada 4 px para bajar costo
+    for (let i = 0; i < data.length; i += 4 * 4) {
+        sum += (data[i] + data[i + 1] + data[i + 2]) / 3;
+    }
+    return sum / (data.length / (4 * 4));
+};
+
+// rVFC si existe; si no, cae a rAF
+const onNextVideoFrame = (video, cb) => {
+    if (video?.requestVideoFrameCallback) {
+        const id = video.requestVideoFrameCallback(() => cb());
+        return () => video.cancelVideoFrameCallback?.(id);
+    }
+    const id = requestAnimationFrame(cb);
+    return () => cancelAnimationFrame(id);
+};
+
+/* =============================
+ * Componente
+ * ============================= */
 
 export default function Scanner() {
+    // ---- refs base ----
     const videoRef = useRef(null);
     const codeReaderRef = useRef(null);
     const controlsRef = useRef(null);
     const streamRef = useRef(null);
-    const imageCaptureRef = useRef(null);
     const wakeLockRef = useRef(null);
-    const rafScanRef = useRef(null);
     const canvasRef = useRef(null);
-    const abortScanLoop = useRef(false);
+    const offCtxRef = useRef(null);
+    const detectorRef = useRef(null);
+    const loopStopRef = useRef(false);
+    const usingNativeRef = useRef(false);
+    const frameCancelRef = useRef(null);
 
+    // ---- estado UI ----
     const [mode, setMode] = useState("peek"); // "peek" | "validate"
     const modeRef = useRef(mode);
-
     const [result, setResult] = useState(null);
     const [error, setError] = useState("");
     const [manual, setManual] = useState("");
     const [active, setActive] = useState(false);
     const [busy, setBusy] = useState(false);
     const [showModal, setShowModal] = useState(false);
-
-    // UX extra
     const [torchOn, setTorchOn] = useState(false);
     const [usingNative, setUsingNative] = useState(false);
 
@@ -42,7 +84,9 @@ export default function Scanner() {
         modeRef.current = mode;
     }, [mode]);
 
-    // ---- helpers de cámara/energía ----
+    /* =============================
+     * Wake Lock
+     * ============================= */
     const requestWakeLock = useCallback(async () => {
         try {
             if ("wakeLock" in navigator && navigator.wakeLock?.request) {
@@ -61,34 +105,12 @@ export default function Scanner() {
         } catch {}
     }, []);
 
-    const stopScanner = useCallback(() => {
-        try {
-            abortScanLoop.current = true;
-            if (rafScanRef.current) {
-                cancelAnimationFrame(rafScanRef.current);
-                rafScanRef.current = null;
-            }
-        } catch {}
-        try {
-            controlsRef.current?.stop();
-            controlsRef.current = null;
-        } catch {}
-        try {
-            const video = videoRef.current;
-            if (video?.srcObject) {
-                video.srcObject.getTracks().forEach((t) => t.stop());
-                video.srcObject = null;
-            }
-        } catch {}
-        streamRef.current = null;
-        imageCaptureRef.current = null;
-        setActive(false);
-        releaseWakeLock();
-    }, [releaseWakeLock]);
-
+    /* =============================
+     * Cámara / Torch
+     * ============================= */
     const pickBackCamera = useCallback(async () => {
         try {
-            // pre-permiso para lograr labels
+            // Pre-permiso para obtener labels
             await navigator.mediaDevices.getUserMedia({ video: true });
         } catch {}
         const devices = await BrowserMultiFormatReader.listVideoInputDevices();
@@ -100,7 +122,6 @@ export default function Scanner() {
         ).deviceId;
     }, []);
 
-    // Encender/apagar torch si existe
     const setTorch = useCallback(
         async (on) => {
             try {
@@ -120,205 +141,265 @@ export default function Scanner() {
         [setTorchOn]
     );
 
-    // ROI centrado (reduce trabajo del detector)
-    const getROI = (w, h) => {
-        // ventana 70% del menor lado
-        const side = Math.floor(Math.min(w, h) * 0.7);
-        const x = Math.floor((w - side) / 2);
-        const y = Math.floor((h - side) / 2);
-        return { x, y, width: side, height: side };
-    };
-
-    // ---- NATIVE BARCODEDETECTOR SCAN LOOP ----
-    const startNativeLoop = useCallback(async () => {
-        if (!("BarcodeDetector" in window)) return false;
-
+    /* =============================
+     * Ciclo de escaneo — Nativo
+     * ============================= */
+    const ensureDetector = useCallback(async () => {
+        if (!("BarcodeDetector" in window)) return null;
+        if (detectorRef.current) return detectorRef.current;
         let formats = ["qr_code"];
         try {
             const supported = await window.BarcodeDetector.getSupportedFormats?.();
             if (supported?.length) {
-                // usa solo QR si está disponible; sino cae a todo
                 formats = supported.includes("qr_code") ? ["qr_code"] : supported;
             }
         } catch {}
+        detectorRef.current = new window.BarcodeDetector({ formats });
+        return detectorRef.current;
+    }, []);
 
-        const detector = new window.BarcodeDetector({ formats });
+    const doValidation = useCallback(
+        async (text) => {
+            setBusy(true);
+            stopScanner(); // pausamos mientras validamos
+            try {
+                const r =
+                    modeRef.current === "validate"
+                        ? await Api.validate(text)
+                        : await Api.validatePeek(text);
+                setResult(r);
+                setError("");
+                setShowModal(true);
+            } catch (e) {
+                setResult(null);
+                setError(e?.message || "Error validando");
+                setShowModal(true);
+            } finally {
+                setBusy(false);
+            }
+        },
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+        []
+    );
+
+    const nativeLoop = useCallback(async () => {
+        const detector = await ensureDetector();
+        if (!detector) return false;
+
+        usingNativeRef.current = true;
         setUsingNative(true);
 
-        const loop = async () => {
-            if (abortScanLoop.current) return;
-            const video = videoRef.current;
+        const video = videoRef.current;
+        if (!video) return false;
+
+        // Canvas y contexto para ROI / luma si se requiere
+        if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
+        if (!offCtxRef.current)
+            offCtxRef.current = canvasRef.current.getContext("2d", {
+                willReadFrequently: true,
+            });
+
+        const tick = async () => {
+            if (loopStopRef.current) return;
             if (!video || video.readyState < 2) {
-                rafScanRef.current = requestAnimationFrame(loop);
+                frameCancelRef.current = onNextVideoFrame(video, tick);
                 return;
             }
 
             try {
-                // recorta en canvas para ROI
-                const vw = video.videoWidth;
-                const vh = video.videoHeight;
-                if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
-                const canvas = canvasRef.current;
-                const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
-                const roi = getROI(vw, vh);
-                canvas.width = roi.width;
-                canvas.height = roi.height;
-                ctx.drawImage(video, roi.x, roi.y, roi.width, roi.height, 0, 0, roi.width, roi.height);
-
-                // Usa ImageBitmap para acelerar en navegadores modernos
-                let bitmap = null;
+                // Camino rápido: algunos navegadores aceptan <video> directo (sin copiar)
+                // Muy rápido si está soportado.
+                let barcodes = null;
+                let usedDirectVideo = false;
                 try {
-                    bitmap = await createImageBitmap(canvas);
+                    barcodes = await detector.detect(video);
+                    usedDirectVideo = true;
                 } catch {
-                    bitmap = canvas; // fallback
+                    /* algunos motores no aceptan <video> */
                 }
 
-                const barcodes = await detector.detect(bitmap);
+                if (!barcodes) {
+                    // ROI + downscale (máximo MAX_PROC_SIDE) para acelerar
+                    const vw = video.videoWidth;
+                    const vh = video.videoHeight;
+                    const roi = getROI(vw, vh);
+
+                    // calculamos escala destino
+                    const scale = Math.min(
+                        1,
+                        MAX_PROC_SIDE / Math.max(roi.width, roi.height)
+                    );
+                    const dw = Math.max(1, Math.floor(roi.width * scale));
+                    const dh = Math.max(1, Math.floor(roi.height * scale));
+
+                    const canvas = canvasRef.current;
+                    const ctx = offCtxRef.current;
+                    canvas.width = dw;
+                    canvas.height = dh;
+                    ctx.drawImage(
+                        video,
+                        roi.x,
+                        roi.y,
+                        roi.width,
+                        roi.height,
+                        0,
+                        0,
+                        dw,
+                        dh
+                    );
+
+                    // Auto-torch en baja luz si es posible (umbral aprox. < 35/255)
+                    try {
+                        const luma = estimateLuma(ctx, dw, dh);
+                        if (luma < 35 && !torchOn) {
+                            await setTorch(true); // si no soporta, simplemente no hace nada
+                        }
+                    } catch {}
+
+                    // createImageBitmap => suele ser más rápido que leer píxeles del canvas
+                    let source = canvas;
+                    try {
+                        source = await createImageBitmap(canvas);
+                    } catch {
+                        /* fallback a canvas */
+                    }
+                    barcodes = await detector.detect(source);
+                }
+
                 if (barcodes?.length) {
                     const text = barcodes[0].rawValue || barcodes[0].displayValue;
                     if (text) {
-                        setBusy(true);
-                        stopScanner(); // pausa mientras validamos/mostramos
-                        try {
-                            const r =
-                                modeRef.current === "validate"
-                                    ? await Api.validate(text)
-                                    : await Api.validatePeek(text);
-                            setResult(r);
-                            setError("");
-                            setShowModal(true);
-                        } catch (e) {
-                            setResult(null);
-                            setError(e?.message || "Error validando");
-                            setShowModal(true);
-                        } finally {
-                            setBusy(false);
-                        }
-                        return; // salimos del loop
+                        await doValidation(text);
+                        return;
                     }
                 }
-            } catch (err) {
-                // errores esporádicos del detector; continua
+            } catch {
+                // errores esporádicos del detector; continuar
             }
 
-            rafScanRef.current = requestAnimationFrame(loop);
+            frameCancelRef.current = onNextVideoFrame(video, tick);
         };
 
-        abortScanLoop.current = false;
-        rafScanRef.current = requestAnimationFrame(loop);
+        loopStopRef.current = false;
+        frameCancelRef.current = onNextVideoFrame(video, tick);
         return true;
-    }, [stopScanner]);
+    }, [ensureDetector, doValidation, setTorch, torchOn]);
 
-    // ---- ZXING LOOP (fallback) ----
-    const startZXing = useCallback(async (deviceId) => {
-        setUsingNative(false);
-        const reader =
-            codeReaderRef.current ||
-            new BrowserMultiFormatReader(
-                ZXHints
-                    ? new ZXHints.Hints()
-                    : undefined
-            );
+    /* =============================
+     * ZXing fallback
+     * ============================= */
+    const startZXing = useCallback(
+        async (deviceId) => {
+            usingNativeRef.current = false;
+            setUsingNative(false);
 
-        // Configura hints si @zxing/library está disponible
-        if (ZXHints && reader?.hints) {
-            try {
-                reader.hints.set(ZXHints.DecodeHintType.TRY_HARDER, true);
-                reader.hints.set(ZXHints.DecodeHintType.POSSIBLE_FORMATS, [ZXHints.BarcodeFormat.QR_CODE]);
-            } catch {}
-        }
+            const reader =
+                codeReaderRef.current ||
+                new BrowserMultiFormatReader(ZXHints ? new ZXHints.Hints() : undefined);
 
-        codeReaderRef.current = reader;
-
-        await reader.decodeFromVideoDevice(
-            deviceId,
-            videoRef.current,
-            async (res, err, controls) => {
-                if (controls && !controlsRef.current) controlsRef.current = controls;
-                const video = videoRef.current;
-                if (video?.srcObject && !streamRef.current) {
-                    streamRef.current = video.srcObject;
-                    // prepara ImageCapture para torch si se puede
-                    try {
-                        const track = streamRef.current.getVideoTracks()[0];
-                        imageCaptureRef.current = new window.ImageCapture(track);
-                    } catch {}
-                }
-                if (!res || busy) return; // back-pressure
-
-                setBusy(true);
-                stopScanner();
+            if (ZXHints && reader?.hints) {
                 try {
-                    const text = res.getText();
-                    const r =
-                        modeRef.current === "validate"
-                            ? await Api.validate(text)
-                            : await Api.validatePeek(text);
-                    setResult(r);
-                    setError("");
-                    setShowModal(true);
-                } catch (e) {
-                    setResult(null);
-                    setError(e?.message || "Error validando");
-                    setShowModal(true);
-                } finally {
-                    setBusy(false);
-                }
+                    reader.hints.set(ZXHints.DecodeHintType.TRY_HARDER, true);
+                    reader.hints.set(ZXHints.DecodeHintType.POSSIBLE_FORMATS, [
+                        ZXHints.BarcodeFormat.QR_CODE,
+                    ]);
+                } catch {}
             }
-        );
-    }, [busy, stopScanner]);
 
-    // ---- START SCANNER (elige nativo o ZXing) ----
+            codeReaderRef.current = reader;
+
+            await reader.decodeFromVideoDevice(
+                deviceId,
+                videoRef.current,
+                async (res, _err, controls) => {
+                    if (controls && !controlsRef.current) controlsRef.current = controls;
+                    const video = videoRef.current;
+                    if (video?.srcObject && !streamRef.current) {
+                        streamRef.current = video.srcObject;
+                    }
+                    if (!res || busy) return; // back-pressure
+                    const text = res.getText();
+                    if (!text) return;
+                    await doValidation(text);
+                }
+            );
+        },
+        [busy, doValidation]
+    );
+
+    /* =============================
+     * Arranque / Parada
+     * ============================= */
+    const stopScanner = useCallback(() => {
+        try {
+            loopStopRef.current = true;
+            if (frameCancelRef.current) {
+                frameCancelRef.current();
+                frameCancelRef.current = null;
+            }
+        } catch {}
+        try {
+            controlsRef.current?.stop();
+            controlsRef.current = null;
+        } catch {}
+        try {
+            const video = videoRef.current;
+            if (video?.srcObject) {
+                video.srcObject.getTracks().forEach((t) => t.stop());
+                video.srcObject = null;
+            }
+        } catch {}
+        streamRef.current = null;
+        setActive(false);
+        releaseWakeLock();
+    }, [releaseWakeLock]);
+
     const startScanner = useCallback(async () => {
         if (!videoRef.current || busy || active) return;
 
         setError("");
         setResult(null);
-        stopScanner(); // limpia cualquier residuo previo
+        stopScanner(); // limpia residuos previos
 
         try {
             const deviceId = await pickBackCamera();
 
-            // intenta abrir la cámara con buenos constraints
+            // Constraints “amigables” para móvil y baja luz
+            const baseVideo = {
+                facingMode: { ideal: "environment" },
+                width: { ideal: 1280 }, // 720p suele bastar y es más rápido que 1080p
+                height: { ideal: 720 },
+                frameRate: { ideal: 30, max: 60 },
+                focusMode: "continuous",
+                // Sugerir exposición y balance blanco continuos si existen
+                advanced: [
+                    { exposureMode: "continuous" },
+                    { whiteBalanceMode: "continuous" },
+                    { zoom: 1.2 }, // un pelín de zoom ayuda con reflejos en pantallas
+                ],
+            };
+
             const constraints = deviceId
-                ? {
-                    video: {
-                        deviceId: { exact: deviceId },
-                        facingMode: { ideal: "environment" },
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
-                        frameRate: { ideal: 30, max: 60 },
-                        focusMode: "continuous",
-                        zoom: { ideal: 1 },
-                        // reduce consumo en iOS
-                        advanced: [{ exposureMode: "continuous" }],
-                    },
-                    audio: false,
-                }
-                : {
-                    video: {
-                        facingMode: { ideal: "environment" },
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
-                        frameRate: { ideal: 30, max: 60 },
-                        focusMode: "continuous",
-                    },
-                    audio: false,
-                };
+                ? { video: { ...baseVideo, deviceId: { exact: deviceId } }, audio: false }
+                : { video: baseVideo, audio: false };
 
             const stream = await navigator.mediaDevices.getUserMedia(constraints);
             const video = videoRef.current;
             video.srcObject = stream;
             streamRef.current = stream;
 
-            // aplica pequeños ajustes posteriores si son soportados
+            // Ajustes post-stream si están soportados (no bloqueantes)
             try {
                 const track = stream.getVideoTracks()[0];
                 const caps = track.getCapabilities?.();
                 const cons = track.getConstraints?.() || {};
                 const advanced = [];
-                if (caps?.focusMode?.includes?.("continuous")) advanced.push({ focusMode: "continuous" });
+                if (caps?.focusMode?.includes?.("continuous"))
+                    advanced.push({ focusMode: "continuous" });
+                if (caps?.whiteBalanceMode?.includes?.("continuous"))
+                    advanced.push({ whiteBalanceMode: "continuous" });
+                if (caps?.exposureMode?.includes?.("continuous"))
+                    advanced.push({ exposureMode: "continuous" });
                 if (caps?.zoom) advanced.push({ zoom: Math.min(caps.zoom.max || 1, 1.5) });
                 if (advanced.length) await track.applyConstraints({ ...cons, advanced });
             } catch {}
@@ -326,15 +407,13 @@ export default function Scanner() {
             setActive(true);
             await requestWakeLock();
 
-            // Espera a que el video “corra”
             await new Promise((r) => {
                 video.onloadeddata = () => r();
             });
 
-            // 1) intento nativo
-            const okNative = await startNativeLoop();
+            // Intento nativo primero
+            const okNative = await nativeLoop();
             if (!okNative) {
-                // 2) fallback ZXing
                 await startZXing(deviceId || undefined);
             }
         } catch (e) {
@@ -344,7 +423,7 @@ export default function Scanner() {
         }
     }, [
         pickBackCamera,
-        startNativeLoop,
+        nativeLoop,
         startZXing,
         busy,
         active,
@@ -353,7 +432,9 @@ export default function Scanner() {
         releaseWakeLock,
     ]);
 
-    // Auto-start al montar
+    /* =============================
+     * Ciclo de vida
+     * ============================= */
     useEffect(() => {
         startScanner();
         return () => {
@@ -378,15 +459,15 @@ export default function Scanner() {
         return () => document.removeEventListener("visibilitychange", onVis);
     }, [startScanner, stopScanner, showModal]);
 
-    // Cierra modal y reinicia cámara
+    // Escape para cerrar modal
     const closeModalAndRestart = useCallback(() => {
         setShowModal(false);
         setResult(null);
         setError("");
+        // pequeño delay para permitir liberar cámara en móviles
         setTimeout(() => startScanner(), 80);
     }, [startScanner]);
 
-    // Escape para cerrar
     useEffect(() => {
         const onKey = (e) => {
             if (e.key === "Escape" && showModal) {
@@ -417,8 +498,12 @@ export default function Scanner() {
         }
     }
 
-    // ---- UI helpers ----
-    const Switch = ({ checked, onChange }) => (
+    /* =============================
+     * UI
+     * ============================= */
+
+    // reemplaza tu Switch por este:
+    const Switch = ({ checked }) => (
         <button
             type="button"
             onClick={() => {
@@ -428,34 +513,26 @@ export default function Scanner() {
                 setMode(next ? "validate" : "peek");
             }}
             aria-pressed={checked}
-            style={{
-                width: 54,
-                height: 30,
-                borderRadius: 999,
-                border: "1px solid #cbd5e1",
-                background: checked ? "#22c55e" : "#e2e8f0",
-                position: "relative",
-                transition: "background .2s",
-                opacity: busy ? 0.6 : 1,
-                cursor: busy ? "not-allowed" : "pointer",
-            }}
-            title={checked ? "Validar (consume)" : "Solo verificar"}
+            className={[
+                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-200",
+                checked ? "bg-emerald-500/80" : "bg-slate-600/70",
+                busy ? "opacity-60 cursor-not-allowed" : "cursor-pointer",
+                "focus:outline-none ring-1 ring-inset",
+                checked ? "ring-emerald-300/50" : "ring-slate-500/60",
+                "focus-visible:ring-2 focus-visible:ring-indigo-400/70"
+            ].join(" ")}
+            aria-label={checked ? "Validar (consume)" : "Solo verificar"}
         >
-      <span
-          style={{
-              position: "absolute",
-              top: 3,
-              left: checked ? 28 : 3,
-              width: 24,
-              height: 24,
-              borderRadius: "50%",
-              background: "#fff",
-              boxShadow: "0 1px 2px rgba(0,0,0,.15)",
-              transition: "left .2s",
-          }}
-      />
+    <span
+        className={[
+            "absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow transition-transform duration-200",
+            checked ? "translate-x-5" : "translate-x-0"
+        ].join(" ")}
+    />
         </button>
     );
+
+
 
     const ModeBadge = () => (
         <div
@@ -463,7 +540,8 @@ export default function Scanner() {
                 position: "absolute",
                 top: 10,
                 right: 10,
-                background: mode === "validate" ? "rgba(16,185,129,.9)" : "rgba(59,130,246,.9)",
+                background:
+                    mode === "validate" ? "rgba(16,185,129,.9)" : "rgba(59,130,246,.9)",
                 color: "#fff",
                 padding: "6px 10px",
                 borderRadius: 999,
@@ -490,187 +568,160 @@ export default function Scanner() {
         </div>
     );
 
-    const Modal = ({ open, onClose, children }) => {
-        if (!open) return null;
-        return (
-            <div
-                role="dialog"
-                aria-modal="true"
-                style={{
-                    position: "fixed",
-                    inset: 0,
-                    background: "rgba(15,23,42,.5)",
-                    display: "grid",
-                    placeItems: "center",
-                    zIndex: 50,
-                    padding: 12,
-                }}
-                onClick={(e) => {
-                    if (e.target === e.currentTarget) onClose();
-                }}
-            >
-                <div
-                    style={{
-                        width: "80vw",
-                        maxWidth: "480px",
-                        maxHeight: "90vh",
-                        overflowY: "auto",
-                        background: "#fff",
-                        borderRadius: 12,
-                        boxShadow: "0 10px 30px rgba(0,0,0,.25)",
-                        padding: 16,
-                    }}
-                >
-                    {children}
-                    <div
-                        style={{
-                            display: "flex",
-                            justifyContent: "flex-end",
-                            marginTop: 12,
-                            gap: 8,
-                            flexWrap: "wrap",
-                        }}
-                    >
-                        <button onClick={onClose} style={{ flex: "1 1 auto" }}>
-                            {modeRef.current === "validate"
-                                ? "Cerrar y seguir validando"
-                                : "Cerrar y seguir verificando"}
+    return (
+        <section className="bg-slate-950 text-white">
+            <div className="mx-auto w-full max-w-screen-xl 2xl:max-w-screen-2xl px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+                <div className="mx-auto w-[min(92vw,980px)]">
+                    <h2 className="mb-4 text-2xl font-bold md:text-3xl">Escanear ticket</h2>
+
+                    {/* Switch de modo */}
+                    <div className="mb-4 flex flex-wrap items-center gap-3">
+                        <span className="text-xs text-slate-400">Modo:</span>
+                        <Switch checked={mode === "validate"} />
+                        <span
+                            className={`text-xs ${
+                                mode === "validate" ? "text-emerald-400" : "text-sky-400"
+                            }`}
+                        >
+            {mode === "validate" ? "Validar (consume)" : "Solo verificar"}
+          </span>
+                    </div>
+
+                    {/* Visor */}
+                    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-slate-700/60 bg-black shadow-2xl">
+                        <video
+                            ref={videoRef}
+                            autoPlay
+                            muted
+                            playsInline
+                            className="h-full w-full object-cover"
+                        />
+                        {/* ROI */}
+                        <div
+                            aria-hidden
+                            className="pointer-events-none absolute inset-0 grid place-items-center"
+                        >
+                            <div className="w-[70%] max-w-[520px] aspect-square rounded-2xl border-2 border-dashed border-white/80 shadow-[0_0_0_9999px_rgba(0,0,0,.35)_inset]" />
+                        </div>
+                        <ModeBadge usingNative={usingNative} mode={mode} />
+                    </div>
+
+                    {/* Controles */}
+                    <div className="mt-4 flex flex-wrap gap-3">
+                        {!active ? (
+                            <button
+                                onClick={startScanner}
+                                disabled={busy}
+                                className="rounded-xl bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-600 disabled:cursor-not-allowed disabled:opacity-70"
+                            >
+                                {mode === "validate"
+                                    ? "Escanear y validar (consume)"
+                                    : "Escanear y verificar"}
+                            </button>
+                        ) : (
+                            <button
+                                onClick={stopScanner}
+                                disabled={busy}
+                                className="rounded-xl border border-slate-600/70 px-4 py-2 text-sm font-semibold hover:bg-slate-900/50 disabled:cursor-not-allowed disabled:opacity-70"
+                            >
+                                Detener escáner
+                            </button>
+                        )}
+
+                        <button
+                            onClick={async () => {
+                                const ok = await setTorch(!torchOn);
+                                if (!ok) {
+                                    setError("Torch no soportado en este dispositivo");
+                                    setShowModal(true);
+                                }
+                            }}
+                            disabled={!active || busy}
+                            className="rounded-xl border border-slate-600/70 px-4 py-2 text-sm font-semibold hover:bg-slate-900/50 disabled:cursor-not-allowed disabled:opacity-70"
+                            title="Linterna (si está disponible)"
+                        >
+                            {torchOn ? "Apagar linterna" : "Encender linterna"}
+                        </button>
+                    </div>
+
+                    {/* Entrada manual */}
+                    <div className="mt-6 grid gap-2">
+                        <label className="text-sm text-slate-300">Texto del QR (opcional)</label>
+                        <textarea
+                            rows={3}
+                            value={manual}
+                            onChange={(e) => setManual(e.target.value)}
+                            className="w-full rounded-xl border border-slate-700/60 bg-slate-950 px-3 py-2 text-sm text-white placeholder-slate-500 outline-none focus:border-indigo-500"
+                        />
+                        <button
+                            onClick={validateManual}
+                            disabled={busy}
+                            className="mt-1 w-full rounded-xl bg-white px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-70 sm:w-auto"
+                        >
+                            {mode === "validate" ? "Validar y consumir texto" : "Verificar texto"}
                         </button>
                     </div>
                 </div>
-            </div>
-        );
-    };
-
-    return (
-        <div className="card">
-            <h2>Escanear ticket</h2>
-
-            {/* Switch de modo */}
-            <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8 }}>
-                <span style={{ fontSize: 12, color: "#64748b" }}>Modo:</span>
-                <Switch checked={mode === "validate"} onChange={() => {}} />
-                <span style={{ fontSize: 12, color: mode === "validate" ? "#166534" : "#0369a1" }}>
-          {mode === "validate" ? "Validar (consume)" : "Solo verificar"}
-        </span>
-            </div>
-
-            {/* Visor */}
-            <div
-                className="scanner"
-                style={{ position: "relative", aspectRatio: "4/3", background: "#000" }}
-            >
-                <video
-                    ref={videoRef}
-                    autoPlay
-                    muted
-                    playsInline
-                    style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                />
-                {/* Marco ROI visual */}
-                <div
-                    aria-hidden
-                    style={{
-                        position: "absolute",
-                        inset: 0,
-                        display: "grid",
-                        placeItems: "center",
-                        pointerEvents: "none",
-                    }}
-                >
-                    <div
-                        style={{
-                            width: "70%",
-                            maxWidth: 480,
-                            aspectRatio: "1/1",
-                            border: "2px dashed rgba(255,255,255,.75)",
-                            borderRadius: 12,
-                            boxShadow: "0 0 0 9999px rgba(0,0,0,.35) inset",
-                        }}
-                    />
-                </div>
-                <ModeBadge />
-            </div>
-
-            {/* Controles */}
-            <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {!active ? (
-                    <button onClick={startScanner} disabled={busy}>
-                        {mode === "validate" ? "Escanear y validar (consume)" : "Escanear y verificar"}
-                    </button>
-                ) : (
-                    <button onClick={stopScanner} disabled={busy}>
-                        Detener escáner
-                    </button>
-                )}
-
-                <button
-                    onClick={async () => {
-                        const ok = await setTorch(!torchOn);
-                        if (!ok) {
-                            setError("Torch no soportado en este dispositivo");
-                            setShowModal(true);
-                        }
-                    }}
-                    disabled={!active || busy}
-                    title="Linterna (si está disponible)"
-                >
-                    {torchOn ? "Apagar linterna" : "Encender linterna"}
-                </button>
-            </div>
-
-            {/* Entrada manual */}
-            <div className="manual" style={{ marginTop: 12 }}>
-                <label>Texto del QR (opcional)</label>
-                <textarea rows={3} value={manual} onChange={(e) => setManual(e.target.value)} />
-                <button onClick={validateManual} disabled={busy} style={{ marginTop: 6 }}>
-                    {mode === "validate" ? "Validar y consumir texto" : "Verificar texto"}
-                </button>
             </div>
 
             {/* Modal de resultados */}
             <Modal open={showModal} onClose={closeModalAndRestart}>
                 {error ? (
-                    <div className="result bad">
-                        <h3>❌ Error</h3>
-                        <p>{error}</p>
+                    <div className="rounded-xl border border-red-300/40 bg-red-500/10 p-4">
+                        <h3 className="mb-1 text-lg font-semibold text-red-200">❌ Error</h3>
+                        <p className="text-sm text-red-100/90">{error}</p>
                     </div>
                 ) : result ? (
-                    <div className={`result ${result.valid ? "ok" : "bad"}`}>
-                        <h3>{result.valid ? "✅ Ticket válido" : "❌ Ticket inválido"}</h3>
-                        {result.ticket_id && (
-                            <p>
-                                <strong>ID : </strong> {result.ticket_id}
-                            </p>
-                        )}
-                        {result.purchaser_name && (
-                            <p>
-                                <strong>Invitado : </strong> {result.purchaser_name}
-                            </p>
-                        )}
-                        {result.national_id && (
-                            <p>
-                                <strong>Cédula : </strong> {result.national_id}
-                            </p>
-                        )}
-                        {result.event_id && (
-                            <p>
-                                <strong>Evento : </strong> {result.event_id}
-                            </p>
-                        )}
-                        {result.used_at && (
-                            <p>
-                                <strong>Usado en : </strong>{" "}
-                                {new Date(result.used_at).toLocaleString()}
-                            </p>
-                        )}
-                        {result.reason && (
-                            <p>
-                                <strong>Motivo : </strong> {result.reason}
-                            </p>
-                        )}
+                    <div
+                        className={`rounded-xl p-4 ${
+                            result.valid
+                                ? "border border-cyan-300/40 bg-cyan-500/10"
+                                : "border border-red-300/40 bg-red-500/10"
+                        }`}
+                    >
+                        <h3 className="mb-2 text-lg font-semibold">
+                            {result.valid ? "✅ Ticket válido" : "❌ Ticket inválido"}
+                        </h3>
+                        <div className="space-y-1 text-sm text-slate-800">
+                            {result.ticket_id && (
+                                <p>
+                                    <span className="font-semibold">ID: </span>
+                                    {result.ticket_id}
+                                </p>
+                            )}
+                            {result.purchaser_name && (
+                                <p>
+                                    <span className="font-semibold">Invitado: </span>
+                                    {result.purchaser_name}
+                                </p>
+                            )}
+                            {result.national_id && (
+                                <p>
+                                    <span className="font-semibold">Cédula: </span>
+                                    {result.national_id}
+                                </p>
+                            )}
+                            {result.event_id && (
+                                <p>
+                                    <span className="font-semibold">Evento: </span>
+                                    {result.event_id}
+                                </p>
+                            )}
+                            {result.used_at && (
+                                <p>
+                                    <span className="font-semibold">Usado en: </span>
+                                    {new Date(result.used_at).toLocaleString()}
+                                </p>
+                            )}
+                            {result.reason && (
+                                <p>
+                                    <span className="font-semibold">Motivo: </span>
+                                    {result.reason}
+                                </p>
+                            )}
+                        </div>
                         {result.valid && (
-                            <p style={{ fontSize: 12, color: "#64748b", marginTop: 8 }}>
+                            <p className="mt-2 text-xs text-slate-600">
                                 {modeRef.current === "validate"
                                     ? "Se marcó como usado (consumido)."
                                     : "Solo verificado. El ticket NO fue consumido."}
@@ -678,9 +729,10 @@ export default function Scanner() {
                         )}
                     </div>
                 ) : (
-                    <p>Sin datos</p>
+                    <p className="text-sm text-slate-700">Sin datos</p>
                 )}
             </Modal>
-        </div>
+        </section>
     );
+
 }

@@ -1,7 +1,39 @@
 ﻿// src/shared/share.js
 import { dataUrlToBlob, generateTicketPNG } from "./ticket-canvas.jsx";
 
-/** Crea File del ticket listo para compartir/descargar */
+/* ------------------------ helpers de entorno ------------------------ */
+const isIOS = () =>
+    typeof navigator !== "undefined" &&
+    /iPad|iPhone|iPod/.test(navigator.userAgent) &&
+    !window.MSStream;
+
+const isSafari = () =>
+    typeof navigator !== "undefined" &&
+    /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+
+/** Abre imagen para guardar en iOS (sin download), o fuerza descarga en otros. */
+function openOrDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+
+    // iOS Safari ignora a.download → abrimos en pestaña nueva para "Guardar imagen"
+    if (isIOS() && isSafari()) {
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+    }
+
+    // Resto: usar descarga directa
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    // Liberar url poco después
+    setTimeout(() => URL.revokeObjectURL(url), 15000);
+}
+
+/* ------------------------ generadores base ------------------------ */
 export async function buildTicketFile(ticket, canvas) {
     const dataUrl = await generateTicketPNG({ ...ticket, canvas });
     const blob = dataUrlToBlob(dataUrl);
@@ -10,7 +42,6 @@ export async function buildTicketFile(ticket, canvas) {
     return { file, filename, dataUrl, blob };
 }
 
-/** Texto estándar del ticket para compartir */
 export function buildShareText(ticket) {
     const {
         event_id,
@@ -38,68 +69,129 @@ export function buildShareText(ticket) {
     );
 }
 
-/** ¿El navegador puede compartir archivos con Web Share API? */
-export function canNativeShareFiles(file) {
-    return typeof navigator !== "undefined" &&
-        navigator.canShare &&
-        navigator.canShare({ files: file ? [file] : [] });
-}
+/* ------------------------ share helpers ------------------------ */
+// Estados posibles:
+// "shared"     -> share nativo completó.
+// "aborted"    -> usuario canceló; NO hacer fallback molesto.
+// "unsupported"-> no hay share nativo disponible.
+// "failed"     -> error real; usar fallback.
 
-/** Compartir nativo (si se puede), si no, fallback a abrir PNG en nueva pestaña */
-export async function shareNativeOrOpen(ticket, canvas) {
-    const { file, dataUrl } = await buildTicketFile(ticket, canvas);
-    const text = buildShareText(ticket);
-    const title = `${ticket.event_id || "Ticket"} ${ticket.ticket_id}`;
-
-    if (canNativeShareFiles(file)) {
-        try {
-            await navigator.share({ title, text, files: [file] });
-            return true;
-        } catch {
-            // usuario canceló o error → seguiremos al fallback
-        }
+async function tryNativeShare({ title, text, file }) {
+    if (typeof navigator === "undefined" || !navigator.share) {
+        return "unsupported";
     }
-    window.open(dataUrl, "_blank", "noopener,noreferrer");
-    return false;
+
+    const tryWithFilesFirst =
+        !!file &&
+        (
+            (navigator.canShare &&
+                (() => {
+                    try {
+                        return navigator.canShare({ files: [file] });
+                    } catch {
+                        return false;
+                    }
+                })()) ||
+            !navigator.canShare // iOS share sin canShare
+        );
+
+    try {
+        if (tryWithFilesFirst) {
+            await navigator.share({ title, text, files: [file] });
+            return "shared";
+        }
+    } catch (err) {
+        // Si el usuario canceló, NO hagamos fallback
+        if (err && (err.name === "AbortError" || err.name === "NotAllowedError")) {
+            return "aborted";
+        }
+        // Si no soporta files, probamos sin ellos
+    }
+
+    // Intento sin archivos
+    try {
+        await navigator.share({ title, text });
+        return "shared";
+    } catch (err) {
+        if (err && (err.name === "AbortError" || err.name === "NotAllowedError")) {
+            return "aborted";
+        }
+        return "failed";
+    }
 }
 
-/** WhatsApp con texto (deep-link). Si soporta share nativo, lo usa primero. */
+/* ------------------------ flujos de compartir ------------------------ */
+
+/**
+ * Share general: intenta nativo con archivo; si no, abre o descarga imagen.
+ */
+export async function shareNativeOrOpen(ticket, canvas) {
+    const { file, blob, filename } = await buildTicketFile(ticket, canvas);
+    const title = `${ticket.event_id || "Ticket"} ${ticket.ticket_id}`;
+    const text = buildShareText(ticket);
+
+    const status = await tryNativeShare({ title, text, file });
+
+    if (status === "shared" || status === "aborted") {
+        // shared -> todo bien; aborted -> usuario canceló, no molestamos.
+        return status === "shared";
+    }
+
+    if (status === "unsupported" || status === "failed") {
+        openOrDownload(blob, filename);
+        return false;
+    }
+}
+
+/**
+ * WhatsApp: primero intenta nativo; si no, usa deep-link (sin archivo).
+ */
 export async function shareWhatsApp(ticket, canvas) {
     const { file } = await buildTicketFile(ticket, canvas);
+    const title = `${ticket.event_id || "Ticket"}`;
     const text = buildShareText(ticket);
 
-    if (canNativeShareFiles(file)) {
-        try {
-            await navigator.share({ title: `${ticket.event_id || "Ticket"}`, text, files: [file] });
-            return;
-        } catch {}
-    }
+    const status = await tryNativeShare({ title, text, file });
+
+    if (status === "shared" || status === "aborted") return;
+
     const wa = `https://wa.me/?text=${encodeURIComponent(text)}`;
     window.open(wa, "_blank", "noopener,noreferrer");
 }
 
-/** Telegram */
+/**
+ * Telegram: usa deep-link directo con texto.
+ */
 export async function shareTelegram(ticket) {
     const text = buildShareText(ticket);
-    const tg = `https://t.me/share/url?url=${encodeURIComponent("")}&text=${encodeURIComponent(text)}`;
+    const tg = `https://t.me/share/url?url=${encodeURIComponent("")}&text=${encodeURIComponent(
+        text
+    )}`;
     window.open(tg, "_blank", "noopener,noreferrer");
 }
 
-/** Email */
-export async function shareEmail(ticket) {
+/**
+ * Email: primero intenta nativo; si no, mailto con texto.
+ */
+export async function shareEmail(ticket, canvas) {
+    const { file } = await buildTicketFile(ticket, canvas);
     const subject = `${ticket.event_id || "Ticket"} ${ticket.ticket_id}`;
     const body = buildShareText(ticket);
-    const mailto = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+
+    const status = await tryNativeShare({ title: subject, text: body, file });
+
+    if (status === "shared" || status === "aborted") return;
+
+    const mailto = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(
+        body
+    )}`;
     window.location.href = mailto;
 }
 
-/** Descargar imagen localmente */
+/**
+ * Descarga directa o abre para guardar en iOS.
+ */
 export async function downloadTicketPng(ticket, canvas) {
-    const { dataUrl, filename } = await buildTicketFile(ticket, canvas);
-    const a = document.createElement("a");
-    a.href = dataUrl;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
+    const { blob, filename } = await buildTicketFile(ticket, canvas);
+    openOrDownload(blob, filename);
 }
